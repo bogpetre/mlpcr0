@@ -51,4 +51,4 @@ potentially useful in many applications, not just when using the mlpcr toolbox.
 
 ## Notes
 * PCR can be performed as a special case of MLPCR. Refer to mlpcr.m help documentation for details
-* This repository was primarily created to document the software used for a [manuscript](https://www.biorxiv.org/content/10.1101/2020.07.04.182873v1). It has been superceded by simpler and more efficient implementations available through the [canlabCore repository](github.com/canlab/canlabCore)
+* This repository was primarily created to document the software used for a [manuscript](https://www.biorxiv.org/content/10.1101/2020.07.04.182873v1). It has been superceded by simpler and more efficient implementations available through the [canlabCore repository](https://github.com/canlab/canlabCore)
