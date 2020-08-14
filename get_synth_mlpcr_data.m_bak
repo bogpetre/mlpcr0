@@ -1,0 +1,270 @@
+% function [X, Y, ll, bb_to_X, bb, w] = get_synth_mlpcr_data(n,X_dims,w_df,latent_df,nsrY,nsrX,...)
+%
+% Generates a sample of Y outcomes that depend on X in some latent 
+% subspace of X in a hierarchical manner, with hierarchy specified by user 
+% supplied group labels.
+%
+% Input ::
+%
+%   n           - Number of observations to sample
+%
+%   lvls        - Number of levels
+%
+%   grps        - cell array of length lvls, each element is a vector
+%                   mapping from elements to group affiliation. First level
+%                   should have a unit vector.
+%
+%   X_dims      - Number of IV. Ignored if 'cov' w also specified.
+%
+%   w_df        - cell array, length "lvls". Each element specifies number 
+%                   of degrees of freedom of your covariance matrix for the
+%                   corresponding levels. This defines the number of 
+%                   non-noise dimensions in X. 
+%                   If supplying custom covariance matrix you may not know
+%                   w_df (e.g. if you use an empirical covariance mat). In
+%                   that case this becomes a hyperparameter analagous to
+%                   the dimensionality hyperparameter in PCR.
+%
+%   latent_df   - cell array, length "lvls". Number of latent IVs on 
+%                  which Y depends from each level
+%
+%   nsrY        - noise to signal ratio for DV measurements. Noise is
+%                   evenly distributed across levels of measurement (e.g. 
+%                   with 2 levels, 50% is fixed effects (FE) error, 50% is 
+%                   RE error; with 3 levels 33% is FE error, 33% is RE 
+%                   error 1 at the 1st level and 33% is RE error at the 2nd
+%                   level; etc). We use nsr instead of snr so we can
+%                   specify noiseless instances without numerical problems.
+%
+%   nsrX        - signal to noise ratio for IV measurements.
+%
+%   covPat      - cell array of length "lvls" - 1 where each element 
+%                   specifies a covariance pattern for random effects. 
+%                   Options are 'isotropic','diagonal', and 'full'. Custom
+%                   random effects covariance pattern specification not
+%                   available at this time.
+%
+% Optional Input ::
+%
+%   'cov'       - followed by a cell array with user supplied covariance 
+%                   matrices of length "lvls". X_dim argument is ignored 
+%                   if user supplies covariance matrix.
+%                   w_df should be an estimate of the user supplied
+%                   matrices df. If in doubt overshoot with w_df.
+%
+% Output ::
+%
+%   Y           - observed DVs with normally distributed additive noise.
+%
+%   X           - n x X_dims multivariate normal matrix of observed IVs 
+%                   with w_df degrees of freedom.
+%
+%   ll          - cell array of length lvls with latent dimensions in X
+%
+%   ll_to_Y     - true fixed effect regression coefficients mapping ll to Y
+%
+%   X_to_Y      - true coefficients mapping X to Y
+%
+%   w           - cell array of length "lvls" containing true covariance 
+%                 matrices with latent_df degrees of freedom that were used
+%                 to generate the multivariate normal X. If user supplied
+%                 covariance matrices, this will just be a copy
+%                 of what the user supplied.
+%
+%   wRE         - lvls-1 cell array of random effects covariances. One
+%                   element per random effect level.
+%
+
+function [X, Y, ll, X_to_Y, ll_to_Y, w, wRE] = get_synth_mlpcr_data(n,lvls,grps,X_dims,w_df,latent_df,nsrY,nsrX,covPat,varargin)
+    %% parse input arguments
+    % get covariance matrix for X
+    w = cell(lvls,1);
+    for i = 1:lvls
+        w_chol = randn(X_dims,w_df{i});
+        w{i} = w_chol*w_chol';
+    end
+    for i = 1:length(varargin)
+        if ischar(varargin{i})
+            switch varargin{i}
+                case 'cov'
+                    w = varargin{i+1};
+                    X_dims = size(w,1);
+                otherwise
+                    error(['Did not understand ', varargin{i}]);
+            end
+        end
+    end
+    
+    %% sanity checks
+    lvlVars = {grps,w_df,latent_df,w};
+    lvlVarNames = {'grps','w_df','latent_df','w'};
+    for i = 1:length(lvlVars)
+        this_var = lvlVars{i};
+        if length(this_var) ~= lvls
+            error([ int2str(i) ' lvls specified but only ' int2str(length(this_var)) ' ' lvlVarNames{i}, ' provided']);
+        end
+    end
+    
+    if length(covPat) ~= lvls - 1
+        error(['covPat has ' int2str(length(covPat)) ' elements, but ' int2str(lvls - 1) ' are needed.']);
+    end
+    
+    if X_dims <= max(cell2mat(w_df))
+        error('X_dim must be >= max(w_df) (covariance matrix df).');
+    end
+    if X_dims <= max(cell2mat(latent_df))
+        error('X_dim must be >= max(latent_df) defining X ~ Y relationship.');
+    end
+    for i = 1:lvls
+        if w_df{i} < latent_df{i}
+            error(['w_df{' int2str(i) '} (covariance matrix df) must be >= latent_df{' int2str(i) '} defining X ~ Y relationship.']);
+        end
+    end
+    if max(cell2mat(w_df)) > n
+        error('max(w_df) (covariance matrix df) must be < n. If you fewer n are desired, simply select a subset post-hoc.');
+    end
+    
+    %% sample noise free instances
+    
+    % meaningful dimensions are some random subset of non-noise dimensions of X;
+    ll_to_Y = cell(lvls,1);
+    ll = cell(lvls,1);
+    pc = cell(lvls,1);
+    yy = 0;
+    X_to_Y = zeros(n,1); % initialize to n x 1, will transform to X_dims x 1 later
+    xx_tot = zeros(n,X_dims);
+    for i = 1:lvls
+        ll_to_Y{i} = zeros(min([X_dims,n]) - 1,1);
+        ll_to_Y{i}(randperm(w_df{i},latent_df{i})) = rand(latent_df{i},1) - 0.5;
+    
+        xx{i} = mvnrnd(zeros(X_dims,1),w{i},n);
+        xx_tot = xx_tot + xx{i};
+        
+        [pc{i},ll{i}] = pca(xx{i},'NumComponents',min([X_dims,n])-1);
+        yy = yy + ll{i}*ll_to_Y{i};
+        
+        X_to_Y = X_to_Y + xx{i}*pinv(pc{i})'*ll_to_Y{i};
+    end
+    X_to_Y = pinv(xx_tot)*X_to_Y; % this is where we transform to X_dims x 1
+
+    %% add noise
+    e = sqrt(nsrY/lvls*var(yy))*randn(n,1);
+    Y = yy + e; 
+    for i = 2:lvls % iteratively add random effects noise
+        this_grp = grps{i};
+        uniq_grp_elem = unique(this_grp);
+        n_units = length(uniq_grp_elem);
+        n_re_betas = length(ll_to_Y{i});
+        
+        % generate random effects covariance
+        wRE = cell(lvls,1);
+        
+        switch covPat{i - 1}
+            case 'full'
+                wRE_chol = 1/n_re_betas*randn(n_re_betas);
+
+                % this tmp_wRE will generate random normal unit 
+                % vectors
+                tmp_wRE = wRE_chol*wRE_chol'; 
+                
+                % RE IVs have their own amplitude: var(ll{i})
+                % note that covariance matrix can be factored as diag(s)*C*diag(s) 
+                %   where s are standard eviation of each dimension and C is the
+                %   correlation matrix between dimensions. We take advantage of
+                %   this implicitly here to normalize by IV amplitudes.
+                tmp_wRE = diag(1./std(ll{i}))*tmp_wRE*diag(1./std(ll{i}));
+            case 'diagonal'
+                tmp_wRE = eye(n_re_betas);
+                tmp_wRE(tmp_wRE == 1) = randn(n_re_betas,1).^2;
+                
+                % this tmp_wRE will generate random normal unit 
+                % vectors
+                tmp_wRE = 1/sum(diag(tmp_wRE))*tmp_wRE;
+                
+                % RE IVs have their own amplitude: var(ll{i})
+                % note that covariance matrix can be factored as diag(s)*C*diag(s) 
+                %   where s are standard eviation of each dimension and C is the
+                %   correlation matrix between dimensions. We take advantage of
+                %   this implicitly here to normalize by IV amplitudes.
+                tmp_wRE = diag(1./std(ll{i}))*tmp_wRE*diag(1./std(ll{i}));
+            case 'isotropic'
+                tmp_wRE = eye(n_re_betas);
+                tmp_wRE(wRE{i} == 1) = randn.^2;
+                
+                % this will generate unit normal vectors
+                tmp_wRE = 1/sum(diag(tmp_wRE))*tmp_wRE;
+                
+                % normalize for IV amplitudes
+                tmp_wRE = 1/mean(var(ll{i}))*tmp_wRE;
+            otherwise
+                error(['Did not understand covPat{' int2str(i - 1) '}: ' covPat{i} '. Options are full, diagonal or isotropic']);
+        end
+        
+        % signal amplitude is var(yy)
+        % fraction of noise allocated to RE: 1/lvls
+        wRE{i} = var(yy) * (nsrY/lvls) * tmp_wRE;
+        
+        % construct each RE block for each instance in grp{i}
+        re_blk = cell(n_units,1);
+        ii = 0;
+        jj = 0;
+        for j = 1:n_units
+            this_grp_elem = this_grp(uniq_grp_elem(j) == this_grp);
+            nn = length(this_grp_elem);
+            these_re = mvnrnd(zeros(1,n_re_betas),wRE{i},1)'; % draw random effects with specified covariance structure
+            re_blk{j} = repmat(these_re,1,nn);
+            ii = ii + size(re_blk{j},1);
+            jj = jj + size(re_blk{j},2);
+        end
+        if jj ~= n
+            error(['Something strange is happening with random effects block generation for lvl ' int2str(i)]);
+        end
+        
+        % plug each re_blk into diagonal of re mat
+        sparsityLim = 0.1;
+        nz = n*n_re_betas;
+        sparsity = nz/(ii * jj);
+        if sparsity < sparsityLim
+            re = spalloc(ii,jj,nz); % preallocate sparse matrix
+        else
+            re = zeros(ii,jj);
+        end
+        last_ii = 0;
+        last_jj = 0;
+        for j = 1:n_units
+            if sparsity < sparsityLim
+                this_blk = sparse(re_blk{j});
+            else
+                this_blk = re_blk{j};
+            end
+            [this_ii, this_jj] = size(this_blk);
+            ii_range = (last_ii + 1):(last_ii + this_ii);
+            jj_range = (last_jj + 1):(last_jj + this_jj);
+            re(ii_range,jj_range) = re_blk{j};
+            last_ii = last_ii + this_ii;
+            last_jj = last_jj + this_jj;
+        end
+        
+        %add random effects to Y
+        if sparsity < sparsityLim
+            Y = Y + full(diag(repmat(ll{i},1,n_units)*re));
+        else
+            Y = Y + diag(repmat(ll{i},1,n_units)*re);
+        end
+        % the fact that I take the diagonal here means I'm probably messing
+        % up my formalism up higher. There should be some matrices Z and u
+        % such that Z*u = re, but instead I ended up with some zz and uu
+        % such that diag(zz*uu) = re. The repmat() invocation is also 
+        % strange. Z shouldn't need replicates like that. Worth revisiting
+        % later.
+    end
+    
+    % the true variance is likely a weighted average of diag(w{i})'s, but
+    % solving it requires some math. Instead let's approximate it
+    % empirically. Note: it might just be sum(diag(w{i}));
+    X = zeros(n,X_dims);
+    for i = 1:lvls
+        X = X + xx{i};
+    end
+    X = X + repmat(var(X)*nsrX,n,1).*randn(size(X)); % add measurement noise (e.g. physiological noise)
+end
